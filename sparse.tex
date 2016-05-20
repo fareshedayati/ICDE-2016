@@ -1,0 +1,266 @@
+\section{Decision Trees With Sparse Input Data} \label{sec:sparse-input-dt}
+
+\subsection{Sparse matrix format}
+
+For memory efficiency and taking advantage of sparsity we use a data structure
+called compressed sparse column (csc) matrix. It is a general format to
+represent compactly sparse matrices using three arrays: a $data$ array that stores
+the value of each nonzero element for each column, an $indices$ array that stores the row indices
+of nonzero elements for each column and an $indptr$ array which stores the beginning and
+end of each column in the $data$ and the $indices$ arrays. The row indices of non-zero data points of column $c$ are stored in $indices[indptr[c]$:$indptr[c+1]]$ with their corresponding non-zero values stored in $data[indptr[c]$:$indptr[c+1]]$. Note that $indptr[c]$:$indptr[c+1]$ corresponds to numbers from $indptr[c]$ (inclusive) to $indptr[c+1]$ (exclusive). \\
+For instance, this $3 \times 5$ matrix
+\[
+\begin{bmatrix}
+1 & 0 & 0 & 4 & 0 \\
+0 & 0 & 0 & 5 & 0 \\
+0 & 0 & 0 & 0 & 0
+\end{bmatrix}
+\]
+is represented by the following csc matrix with arrays
+\begin{align*}
+data &= \begin{bmatrix}1 & 4 & 5\end{bmatrix}, \\
+indices &= \begin{bmatrix}0 & 0 & 1\end{bmatrix}, \\
+inptr &= \begin{bmatrix}0 & 1 & 1 & 1 & 3 & 3\end{bmatrix}.
+\end{align*}
+In the above example the fourth column corresponds to the row indices $indices[indptr[3]$:$indptr[3+1]]$ = $indices[1$:$3]$ = $[0, 1]$ with data points $indices[indptr[3]$:$indptr[3+1]]$ = $data[1$:$3]$ = $[4, 5]$, meaning only row $0$ and row $1$ in column $3$ have non-values with values $4$ and $5$ respectively. The main advantages of csc matrices are to allow fast column indexing, efficient arithmetic and matrix operations. However, row indexing is slow. Note that a
+similar row-based sparse matrix called compressed sparse row format also exists and works under similar principles. Note that both of these sparse matrices are available in \emph{scikit-learn}\footnote{http://docs.scipy.org/doc/scipy-0.16.0/reference/generated/scipy.sparse.csc\_matrix.html}.\\
+
+In order to grow decision trees on sparse input matrix, we have to require a sparse matrix format with efficient row indexing as the tree works with subset of the samples, and also efficient column indexing as features are randomly sampled at each node. Furthermore, we hope to speed up the overall algorithm by taking into account the input space sparsity. Compressed sparse column matrix already satisfies the fast column indexing requirement. We are going to show how to efficiently exploit the data structure as to have a fast row indexing and use the proposed approach to speed up the overall algorithm on sparse data.\\
+
+ At the core of our proposed method is a fast sorting algorithm (a substitute for Line~\ref{line_sorting} in Algorithm~\ref{find_best_split}) that works with non-zero values of a feature, sorts the positive and negative parts separately, and rearranges the sample set accordingly. \\
+
+\subsection{Nonzero Values of $\mathcal{L}_p$}
+
+Given the sparse matrix format, the main issue is to efficiently perform the
+extraction of the sample values reaching the node (the line \ref{alg-line:value-extract}
+of Algorithm \ref{find_best_split}). Note that this is the only operation which requires interaction
+with the input matrix data. Otherwise said for a given feature $j$, one has to be able to perform the intersection between the
+sample set $\mathcal{L}_p$ which has reached the node  and the row indices in $\mathcal{L}$ where feature $j$ is non-zero or mathematically with the set $indices[indptr[j]$:$indptr[j+1]]$. In short, we need to compute the intersection of the set of row indices of the training data in the current node and the set of row indices of the whole training data where feature $j$ is non-zero. This intersection is needed to generate a set of
+possible splitting rules for feature $j$. \\
+
+We let $m_j$ be the number of data points where their feature $j$ is non-zero: 
+\begin{equation}
+m_j=indptr[j+1] -indptr[j]
+\end{equation}
+ If we assume that the $indices$ of the input csc matrix array are sorted per column, then standard intersection algorithms have the following time complexity:
+
+\begin{enumerate}
+\item in $O(|\mathcal{L}_p| \log{m_j})$ by performing $|\mathcal{L}_p| $ binary
+search on the sorted $m_j$ nonzero elements;
+\item in $O(|\mathcal{L}_p|\log{|\mathcal{L}_p|} + m_j\log{|\mathcal{L}_p|})$
+by sorting the sample set $\mathcal{L}_p$ and performing $m_j$ binary search on
+$\mathcal{L}_p$;
+\item in $O(|\mathcal{L}_p|\log{|\mathcal{L}_p|} + m_j + |\mathcal{L}_p|)$ by sorting the
+sample set $\mathcal{L}_p$ and retrieving the intersection by iterating over both
+arrays;
+\item in $O(m_j)$ by maintaining a hash table of $\mathcal{L}_p$ and 
+then checking if elements of $indices[indptr[j]$:$indptr[j+1]]$ are contained
+in the hash table.\\
+\end{enumerate} 
+
+As explained below, we will be using a hybrid solution composed of a variation of approach (4) and approach (1).  In the context of decision tree induction, the intersection operation will be repeated for each feature and for various sample sets $\mathcal{L}_p$.
+Taking this into account, it's possible to improve approach (4). 
+
+Before going into details of the hybrid approach, understanding the manipulation of data in $\mathcal{L}$ is of essential importance.  $\mathcal{L}$ is the list of row indices; if there are $10$ samples in the set then $\mathcal{L} = [0,\,1\,,\cdots, 9]$. During the tree growth in Algorithm~\ref{tree_induction} when $\mathcal{L}$ is split into two sets $\mathcal{L}_l = [9,\, 1, \,5, \,3]$ and $\mathcal{L}_r = [2, \,7, \,6, \,4, \,8, \,0]$, the row indices will be shuffled in $\mathcal{L}$ in such a way that the indices in  $\mathcal{L}_l$ are pushed to the left part of $\mathcal{L}$ and the indices in $\mathcal{L}_r$ are pushed to the right side of $\mathcal{L}$. This means that $\mathcal{L}$ will be shuffled to $[9, \,1, \,5, \,3, \,2, \,7, \,6, \,4,\, 8, \,0]$. Each node is then represented by a slice $[start:end]$, a chunk in the original list $\mathcal{L}$. In the above example, $\mathcal{L}_l$ will represented by the slice $[0:4]$ and $\mathcal{L}_r$ will be represented by the slice $[4:10]$. Now if the right node  $\mathcal{L}_r$ is further split into a left node $\mathcal{L}_{rl} = [6,0]$ and a right node  $\mathcal{L}_{rr} = [2, 7, 4, 8]$ then $\mathcal{L}[4:10]$ is further rearranged to reflect this change. $\mathcal{L}$ becomes $[9, \,1,\, 5,\, 3,\, 2,\, 7,\, 4,\, 8,\, 6,\, 0]$, $\mathcal{L}_{rl}$ is represented by $[4:9]$, and $\mathcal{L}_{rr}$ is represented by $[9:10]$.  \\
+
+
+The main idea of approach (4) is to maintain during the tree growth a \emph{mapping}, as shown in Figure~\ref{fig:mapping}, between the $indices$ array of the csc
+matrix, and the position of the related samples in the sample set array $\mathcal{L}$. Row indices gets shuffled in $\mathcal{L}$ all the time. For a row index $i$ \emph{mapping} keeps track of its current position. In other words  \emph{mapping} keeps track of where sample $i$ is in $\mathcal{L}$. For example row index $6$ (or the 7th sample in the original dataset) was initially at position $6$ in $\mathcal{L}$ in the example above (note that $\mathcal{L}$ was initially $[0,\, 1,\, 2,\, 3,\, 4,\, 5,\, 6,\, 7, \,8,\,9]$) which translates to $mapping[6] = 6$. But after a few splits $\mathcal{L}$ was rearranged to  $[9, \,1, \,5,\, 3,\, 2,\, 7,\, 4,\, 8,\, 6,\, 0]$ which in turn have changed $mapping[6]$ to be $8$. More generally during training we always keep the following invariance in place for each {\bf pos} in $\mathcal{L}$ : 
+\begin{equation}
+mapping[\mathcal{L}[\text{\bf pos}]] = {\bf pos}.
+\end{equation}
+
+
+The main usage of $mapping$ is for efficient computation of the intersection of the current node $\mathcal{L}_p$ and all row indices that have non-zero values for a given feature $j$, i.e. the set $indices[indptr[j]$:$ndptr[j+1]]$. This intersection is basically the subset of the current node $\mathcal{L}_p$ that are non-zero at their feature $j$. Let's assume that the current node $\mathcal{L}_p$ is represented by $[start:end]$ as shown in Figure~1. Then for a row index $i$ in $indices[indptr[j]$:$ndptr[j+1]]$, if $mapping[i]$ is between $start$ and $end$ then the sample should be in $\mathcal{L}_p$. 
+Thus, it's possible to check in $O(1)$ if a sample with non-zero value at a given feature is in the current node $\mathcal{L}_p$ or not. Maintaining the $mapping$ for a given position {\bf pos} is done in $O(1)$ by
+setting $mapping[\mathcal{L}[\text{\bf pos}]]$ to {\bf pos}. Thus we deduce that performing the intersection between the $indices[indptr[j]$:$ndptr[j+1]]$ array and $\mathcal{L}_p$ can be
+done in $O(m_j)$ ($m_j$ = $indptr[j + 1] - indptr[j]$ is the number of non-zero values of feature $j$ in $\mathcal{L}$).
+
+\begin{figure}
+  \centering
+   \def\svgwidth{0.4\textwidth}
+   \graphicspath{{images}}
+   \input{images/mapping.pdf_tex}
+   \caption{The array $mapping$ allows to efficiently compute the intersection between the $indices$ array of the csc matrix
+            and a sample set $\mathcal{L}_p$}
+   \label{fig:mapping}
+\end{figure}
+
+With the application of the mapping intersection algorithm, we can speed up the
+sorting operation and splitting rule evaluation of Algorithm~\ref{find_best_split}
+by working separately on positive and negative values. Furthermore, it's also
+possible to partition a sample set $\mathcal{L}_p$ into two partition $\mathcal{L}_r$ and
+$\mathcal{L}_r$ (line~ \ref{line_partition} of Algorithm~\ref{tree_induction})
+given a split on feature $j$ in $O(m_j)$ instead of $O(n)$. For more details of this algorithm refer to Algorithm \ref{map}. \\
+
+In practice, the number of nonzero elements $m_j$ of feature $j$ could be a
+lot bigger than the size of a sample set $\mathcal{L}_p$. This is likely to
+happen near the leaf nodes. Whenever the tree is fully developed, there are
+only a few   samples reaching those nodes. For optimal performance, one can use
+a hybrid intersection approach which combines the previously developed mapping
+intersection approach with approach (1) based on binary search. whenever $|\mathcal{L}_p| \ll
+m_j$, the binary approach will be faster. In this case for each row index $i$ in $\mathcal{L}_p$, a binary search will be performed on $indices[indptr[j]$:$indptr[j+1]]$. This takes $O(|\mathcal{L}_p| \log{m_j})$, as each binary search takes at most $\log{m_j}$ and there are $|\mathcal{L}_p|$ elements that need to be searched for in $indices[indptr[j]$:$indptr[j+1]]$. 
+For more details of this algorithm refer to Algorithm \ref{bsearch}. \\
+
+The hybrid algorithm uses the binary search of Algorithm~\ref{bsearch} when the cost of approach (1) is smaller than $O(m_j)$. More specifically, the hybrid approach is controlled by the following rule: 
+ \begin{equation}
+ \label{switch}
+ |\mathcal{L}_p| \times \log(m_j) < 0.1 \times m_j. %  |\mathcal{L}_p| \times \log(|\mathcal{L}_p|) +
+ \end{equation}
+Algorithm~\ref{map} is used whenever Equation~\ref{switch} is true and Algorithm~ \ref{bsearch} is used otherwise. This is exactly Algorithm~\ref{algo:sparse-split}. Note that $0.1$ is optained empirically. 
+
+During the tree growth, one could remember which features are constant for a
+subset of the samples $\mathcal{L}_p$ and a given node $t_p$. For all
+descendant of node $t_p$, this will avoid the overhead of searching for a
+split where none exists for those features. 
+
+Finally note that for testing, the sparse data is flattened for efficient random
+memory access.\\
+
+\subsection{The Optimal Split}
+The optimal split in sparsely representable data is a hybrid solution of two sorting algorithms that are well-suited for sparse csc matrices. For a given feature $j$ the positive and negative values of the current node $\mathcal{L}_p$ are extracted and sorted in two different lists ($F_p$ and $N_p$ of Algorithm~\ref{algo:sparse-split} Lines 7 and 10) with their corresponding indices rearranged in $\mathcal{L}$. To choose the correct sorting algorithm the criterion in Equation~8 is checked to see if approach (1) is more suitable or approach (4) (See Line~6 in Algorithm~\ref{algo:sparse-split} below). Based on this criterion either approach (1) in Line~8 ({\scshape sort\_bsearch}) is used or approach (4) in Line~11 ({\scshape sort\_mapping}). Note that since there are significantly less nonzero values in sparse data, sorting the positive and negative values separately will be very cost effective. After sorting, the best threshold is sought separately in positive values and negative values. Lines 13-20 finds the best split among the negatives values and Lines 21-28 finds the best split among negative values. The final best split $s^*$ is the best among the two cases. 
+
+\begin{algorithm}\label{algo:sparse-split}
+Find the best split
+\begin{algorithmic}[1]
+\Function{FindBestSparseSplit}{X, $\mathcal{L}_p$}
+   \State Let $[{start}:{end}]$ be such that $\mathcal{L}_p$ = $\mathcal{L}{[{start}:{end}]}$
+    \State $\text{best} = -\infty$
+    \For{$j \in \{0, \ldots, m-1\}$}
+	    \State $m_j$ = $indptr[j + 1] - indptr[j]$
+	    \If{$|\mathcal{L}_p| \times \log(m_j) < 0.1\times m_j$} %|\mathcal{L}_p| \log|\mathcal{L}_p| +
+	    \State {$F_p, F_n$ = }
+	    \State \Call{sort\_bsearch}{$X$, $start$, $end$, $mapping$, $j$}
+	    \Else 
+	    \State {$F_p, F_n$ = }
+	    \State \Call{sort\_mapping}{$X$, $start$, $end$, $mapping$, $j$}
+	    \EndIf
+        \For{$\theta$ in ${F}_n$}
+            \State $s$ = $\left(j, \theta\right)$
+             \State $\text{score} = \Delta{}I(s, \mathcal{L}{[start:end]})$.
+            \If{$\text{score} > \text{best}$}
+                \State $\text{best} =\text{score}$
+                \State $s^* = s$
+            \EndIf
+        \EndFor
+            \For{$\theta$ in ${F}_p$}
+            \State $s$ = $\left(j, \theta\right)$
+            \State $\text{score} = \Delta{}I(s, \mathcal{L}{[start:end]})$.
+            \If{$\text{score} > \text{best}$}
+                \State $\text{best} =\text{score}$
+                \State $s^* = s$
+            \EndIf
+        \EndFor
+
+    \EndFor
+    \State \Return $s^*$
+\EndFunction
+\end{algorithmic}
+%}
+\end{algorithm}
+
+The {\scshape sort\_mapping} in Algorithm~\ref{map} below extracts samples with positive or negative values of feature $j$ at the current node $\mathcal{L}_p$ represented by the slice $[start: end]$ with the aid of $mapping$. It basically looks at each row index $index$ in $indices[indptr[j]$:$indptr[j+1]]$ and checks if that $index$ is mapped to a number between $start$ and $end$ in $mapping$ (Line~12). If this is the case then that row index is part of the current node and its value is appended to $F_p$ if it is positive (Line~15) or to $F_n$ if it is negative (Line~19). Note that after appending the non-zero value to the appropriate list ($F_p$ or $F_n$ deepening on the sign of the value) the function {\scshape SWAP} is called (Lines 17 and 20). {\scshape SWAP} (in Algorithm~\ref{aux}) makes sure that the row indices with positive values are pushed to the right of $\mathcal{L}{[start:end]}$ and the row indices with negative values are pushed to the left of $\mathcal{L}{[start:end]}$. This is done by the help of auxiliary variables $start_p$ and $end_n$. $start_p$ is the left most position of row indices $\mathcal{L}{[start:end]}$ in $\mathcal{L}$ that are positive in the given feature $j$ and $end_n$ is the right most position of row indices that are negative in feature $j$. Initially $start_p$ points to $end$ (the end of $\mathcal{L}{[start:end]}$) and $end_n$ points to $start$  (the being of $\mathcal{L}{[start:end]}$). As soon as a row index with non-zero value from $indices[indprt[j]:indptr[j+1]]$ is found in $\mathcal{L}{[start:end]}$, then if its value is negative it will be swapped with whatever element is at $end_n$ and $end_n$ shifts one position to the right (Line~21) and if it is positive  $start_p$ shifts one element to the left (Line~16) and the row index will be swapped with whatever element is at $start_p$. This guarantees that row indices with positive values are pushed to the end of $\mathcal{L}{[start:end]}$ and row indices with negative values to the beginning of $\mathcal{L}{[start:end]}$. \\
+
+During the rearrangement of row indices in $\mathcal{L}{[start:end]}$, \\$mapping$ is kept up-to-date. Finally at Line~24 all row indices with negative values are to the left of $\mathcal{L}{[start:end]}$ and all the row indices with positive values are to the right of it and the row indices in between correspond to samples with value zero (of feature $j$). Lines 25 and 26 sorts the positive and negative parts of $\mathcal{L}{[start:end]}$ based on their values in $F_p$ and $F_n$ such that the row indices in $\mathcal{L}{[start:end]}$ are sorted based on feature $j$ in an ascending order (for details on the sorting algorithm refer to {\scshape Sort} in Algorithm~\ref{aux}). 
+\begin{algorithm}\label{map}
+Sorts $X_{\mathcal{L}[start:end]}$ along the $jth$ feature by rearranging their indices in $\mathcal{L}[start:end]$ via $mapping$, and returns the sorted positive and negative values separately. 
+%\textnormal{
+\begin{algorithmic}[1]
+\Function{sort\_mapping}{$X$, $start$, $end$, $mapping$, $j$}
+    \State $F_p = [ ]  $
+    \State $F_n = [ ] $
+   \State $start_p$ = $end$ 
+    \State $end_n$ = $start$ 
+    \State {$incides$ = X.indices}
+    \State {$indptr$ = X.indptr}
+    \State {$data$ = X.data}
+    \For{$k \in [indptr[j] \mbox{:} indptr[j+1]]$}
+    	\State $index = indices[k]$
+        \State $value = data[k]$
+         \If{$start\,\, \leq mapping[index] \,\, < \,\, end$}
+         \State $h$ = $mapping[index]$
+            	\If {$value > 0$}
+	
+		\State $F_p$.\Call{append}{$value$}
+		\State $start_p \,\, -= 1$
+		\State \Call{Swap}{$\mathcal{L}$,  $h$, $start_p$, $mapping$}
+	         \Else
+		\State $F_n$.\Call{append}{$value$}
+	         \State \Call{Swap}{$\mathcal{L}$,  $h$, $end_n$, $mapping$}
+	        \State $end_n \,\, += 1$
+	        \EndIf
+         \EndIf
+     \EndFor
+        \State \Call{Sort}{$F_n$, $\mathcal{L}$, $start$, $end_n$}
+        \State \Call{Sort}{$F_p$, $\mathcal{L}$, $start_p$, $end$}
+        \State \Return {$F_p, F_n$}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+The {\scshape sort\_bsearch} in Algorithm~\ref{bsearch} below has the same effect as {\scshape sort\_mapping}. The only different between this function and {\scshape sort\_mapping} is that instead of iterating over each row index $index$ in $indices[indptr[j]$:$indptr[j+1]]$ and checking whether it is in $\mathcal{L}[start:end]$ or not, the algorithm iterates the other way around. It iterates over each row index $index$ in $\mathcal{L}[start:end]$ and checks whether it is in $indices[indptr[j]$:$indptr[j+1]]$ or not by performing a binary search (Line~14). If the binary search found the element the same procedure is carried as in {\scshape sort\_mapping}. The positive and negative values are appended to $F_p$ and $F_n$ respectively and the row indices are shuffled around in $\mathcal{L}[start:end]$ by  {\scshape swap} in a way that the row indices with positive values of feature $j$ are pushed to the right of $\mathcal{L}[start:end]$ and row indices with negative values are pushed to the left of $\mathcal{L}[start:end]$. Finally as in {\scshape sort\_mapping}, the left and right parts of $\mathcal{L}[start:end]$ that now contains row indices with negative and positive values respectively are sorted separately to make $\mathcal{L}[start:end]$ entirely sorted in an ascending order of the values of feature $j$. 
+
+\begin{algorithm}\label{bsearch}
+Sorts $X_{\mathcal{L}[start:end]}$ along the $jth$ feature by rearranging their indices in $\mathcal{L}[start:end]$, via a binary search, and returns the sorted positive and negative values separately. 
+%\textnormal{
+\begin{algorithmic}[1]
+\Function{sort\_bsearch}{$X$, $start$, $end$, $mapping$, $j$}
+    \State $F_p = [ ]  $
+    \State $F_n = [ ] $ 
+    \State $start_p$ = $end$ 
+    \State $end_n$ = $start$ 
+    \State $incides$ = X.indices
+    \State $indptr$ = X.indptr
+    \State $data$ = X.data
+    \State $indices_j = indices[indptr[j]:indptr[j+1]]$
+    \State $data_j= data[indptr[j]:indptr[j+1]]$
+    \State $\mathcal{L}$ = \Call{sort}{$\mathcal{L}$, start, end} 
+     \For{$h \in [start:end]$}
+	   \State $index$ = $\mathcal{L}[h]$
+     	   \State $i$ = \Call{BinarySearch}{$index$, $indices_j$}
+	   \State Returns the position of $index$ in  $indices_j$, 
+	   \State and -1 if it is not found.
+	   \If {$i \neq -1$ }
+	   	 \If{$data_j[i]  > 0$}
+		 \State $end_p \,\, -= 1$
+		\State $F_p$.\Call{append}{$value$}
+		\State \Call{Swap}{$\mathcal{L}$,  $h$, $start_p$, $mapping$}
+	         \Else
+		\State $F_n$.\Call{append}{$value$}
+	         \State \Call{Swap}{$\mathcal{L}$,  $h$, $end_n$, $mapping$}
+	        \State $end_n \,\, += 1$
+	        \EndIf
+        		\EndIf
+        \EndFor
+        \State \Call{Sort}{$F_n$, $\mathcal{L}$, $start$, $end_n$}
+        \State \Call{Sort}{$F_p$, $\mathcal{L}$, $start_p$, $end$}
+        \State \Return {$F_p, F_n$}
+\EndFunction
+\end{algorithmic}
+%}
+\end{algorithm}
+
+\begin{algorithm}\label{aux}
+Auxiliary functions%\textnormal{
+
+\begin{algorithmic}[1]
+\Function{Swap}{$\mathcal{L}$, $p_1$, $p_2$, $mapping$}
+\State $\mathcal{L}[p_1]$, $\mathcal{L}[p_2]$ = $\mathcal{L}[p_2]$, $\mathcal{L}[p_1]$
+\State $mapping[\mathcal{L}[p_1]] = p_1$
+\State $mapping[\mathcal{L}[p_2]] = p_2$
+\EndFunction
+\end{algorithmic}
+
+\begin{algorithmic}[1]
+\Function{Sort}{$F$, $\mathcal{L}$, $p_1$, $p_2$, $mapping$}
+\State Sort $F$ and  $\mathcal{L}{[p_1:p_2]}$ by increasing values of $F$
+ \For{$p \in [p_1:p_2]$}
+	\State $mapping[\mathcal{L}[p]] = p$
+ \EndFor
+\EndFunction
+\end{algorithmic}
+
+%}
+\end{algorithm}
+
+
